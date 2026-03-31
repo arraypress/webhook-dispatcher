@@ -3,9 +3,10 @@
  *
  * Dispatch webhook events to endpoints with HMAC-SHA256 signing.
  *
- * Provides two levels of abstraction:
+ * Provides both sending and receiving:
  *   - `dispatch()` — High-level: pass endpoints and data, get signed deliveries.
- *   - `signPayload()` / `deliverToEndpoint()` — Low-level building blocks.
+ *   - `deliverToEndpoint()` / `signPayload()` — Low-level sending building blocks.
+ *   - `verifyPayload()` — Receiver-side signature verification.
  *
  * All errors are caught — webhook delivery never throws.
  *
@@ -179,6 +180,64 @@ export async function deliverToEndpoint(endpoint, eventName, bodyStr, options = 
  * });
  * // Headers: X-FlareCart-Event, X-FlareCart-Signature, etc.
  */
+/**
+ * Verify an incoming webhook payload signature.
+ *
+ * Use this on the receiving side to confirm that a webhook was sent by
+ * a trusted source and hasn't been tampered with. Also checks for replay
+ * attacks by rejecting timestamps older than the tolerance window.
+ *
+ * @param {Object} options
+ * @param {string} options.body - The raw request body string.
+ * @param {string} options.signature - The signature header value (e.g. "sha256=a1b2c3...").
+ * @param {string} options.timestamp - The timestamp header value (unix seconds as string).
+ * @param {string} options.secret - The shared signing secret.
+ * @param {number} [options.tolerance] - Max age in seconds before rejecting (default 300 = 5 min). Set to 0 to disable.
+ * @returns {Promise<Object>} Result with `valid` boolean, and `reason` string if invalid.
+ *
+ * @example
+ * import { verifyPayload } from '@arraypress/webhook-dispatcher';
+ *
+ * const result = await verifyPayload({
+ *   body: await request.text(),
+ *   signature: request.headers.get('X-Webhook-Signature'),
+ *   timestamp: request.headers.get('X-Webhook-Timestamp'),
+ *   secret: 'whsec_abc123',
+ * });
+ *
+ * if (!result.valid) {
+ *   return new Response(result.reason, { status: 401 });
+ * }
+ *
+ * @example
+ * // Disable replay protection
+ * await verifyPayload({ body, signature, timestamp, secret, tolerance: 0 });
+ */
+export async function verifyPayload({ body, signature, timestamp, secret, tolerance = 300 }) {
+  if (!body || !signature || !timestamp || !secret) {
+    return { valid: false, reason: 'Missing required fields' };
+  }
+
+  // Check replay tolerance
+  if (tolerance > 0) {
+    const ts = Number(timestamp);
+    if (isNaN(ts)) return { valid: false, reason: 'Invalid timestamp' };
+    const age = Math.floor(Date.now() / 1000) - ts;
+    if (age > tolerance) return { valid: false, reason: 'Timestamp too old' };
+    if (age < -tolerance) return { valid: false, reason: 'Timestamp in the future' };
+  }
+
+  try {
+    const expected = await signPayload(secret, Number(timestamp), body);
+    if (signature !== expected) {
+      return { valid: false, reason: 'Signature mismatch' };
+    }
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: 'Verification failed' };
+  }
+}
+
 export async function dispatch({ endpoints, event, data, onDelivery, timeout, headerPrefix }) {
   if (!endpoints || !endpoints.length) return [];
 

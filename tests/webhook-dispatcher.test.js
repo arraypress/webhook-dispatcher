@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { signPayload, deliverToEndpoint, dispatch } from '../src/index.js';
+import { signPayload, deliverToEndpoint, dispatch, verifyPayload } from '../src/index.js';
 
 // ── Mock fetch ─────────────────────────────────
 
@@ -216,5 +216,120 @@ describe('dispatch', () => {
     });
     const { opts } = globalThis.fetch.calls[0];
     assert.equal(opts.headers['X-MyApp-Event'], 'test');
+  });
+});
+
+// ── verifyPayload ──────────────────────────────
+
+describe('verifyPayload', () => {
+  const secret = 'whsec_test_secret';
+  const body = '{"event":"order.completed","data":{"id":1}}';
+
+  async function makeValidParams() {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = await signPayload(secret, Number(timestamp), body);
+    return { body, signature, timestamp, secret };
+  }
+
+  it('returns valid for correct signature', async () => {
+    const params = await makeValidParams();
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, true);
+    assert.equal(result.reason, undefined);
+  });
+
+  it('rejects wrong signature', async () => {
+    const params = await makeValidParams();
+    params.signature = 'sha256=0000000000000000000000000000000000000000000000000000000000000000';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Signature mismatch');
+  });
+
+  it('rejects wrong secret', async () => {
+    const params = await makeValidParams();
+    params.secret = 'wrong_secret';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Signature mismatch');
+  });
+
+  it('rejects tampered body', async () => {
+    const params = await makeValidParams();
+    params.body = '{"event":"order.completed","data":{"id":2}}';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Signature mismatch');
+  });
+
+  it('rejects missing body', async () => {
+    const params = await makeValidParams();
+    params.body = '';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Missing required fields');
+  });
+
+  it('rejects missing signature', async () => {
+    const params = await makeValidParams();
+    params.signature = '';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Missing required fields');
+  });
+
+  it('rejects missing timestamp', async () => {
+    const params = await makeValidParams();
+    params.timestamp = '';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Missing required fields');
+  });
+
+  it('rejects missing secret', async () => {
+    const params = await makeValidParams();
+    params.secret = '';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Missing required fields');
+  });
+
+  it('rejects old timestamp beyond tolerance', async () => {
+    const oldTimestamp = String(Math.floor(Date.now() / 1000) - 600);
+    const signature = await signPayload(secret, Number(oldTimestamp), body);
+    const result = await verifyPayload({ body, signature, timestamp: oldTimestamp, secret });
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Timestamp too old');
+  });
+
+  it('rejects future timestamp beyond tolerance', async () => {
+    const futureTimestamp = String(Math.floor(Date.now() / 1000) + 600);
+    const signature = await signPayload(secret, Number(futureTimestamp), body);
+    const result = await verifyPayload({ body, signature, timestamp: futureTimestamp, secret });
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Timestamp in the future');
+  });
+
+  it('accepts old timestamp when tolerance is 0', async () => {
+    const oldTimestamp = String(Math.floor(Date.now() / 1000) - 99999);
+    const signature = await signPayload(secret, Number(oldTimestamp), body);
+    const result = await verifyPayload({ body, signature, timestamp: oldTimestamp, secret, tolerance: 0 });
+    assert.equal(result.valid, true);
+  });
+
+  it('accepts custom tolerance', async () => {
+    const ts = String(Math.floor(Date.now() / 1000) - 500);
+    const signature = await signPayload(secret, Number(ts), body);
+    // Default 300s tolerance would reject, but 600s should accept
+    const result = await verifyPayload({ body, signature, timestamp: ts, secret, tolerance: 600 });
+    assert.equal(result.valid, true);
+  });
+
+  it('rejects invalid timestamp string', async () => {
+    const params = await makeValidParams();
+    params.timestamp = 'not-a-number';
+    const result = await verifyPayload(params);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, 'Invalid timestamp');
   });
 });

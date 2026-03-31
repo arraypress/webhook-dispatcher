@@ -1,6 +1,6 @@
 # @arraypress/webhook-dispatcher
 
-Dispatch webhook events to endpoints with HMAC-SHA256 signing. Three functions, zero dependencies.
+Dispatch and verify webhook events with HMAC-SHA256 signing. Zero dependencies.
 
 Uses the Web Crypto API — works in Cloudflare Workers, Node.js 18+, Deno, Bun, and browsers.
 
@@ -133,16 +133,38 @@ await dispatch({
 
 ## Verifying Signatures (Receiver Side)
 
-To verify incoming webhooks, reconstruct the signed message and compare:
+Use `verifyPayload` to verify incoming webhooks. Checks the HMAC signature and rejects stale timestamps (replay protection).
 
 ```js
-const timestamp = request.headers.get('X-Webhook-Timestamp');
-const signature = request.headers.get('X-Webhook-Signature');
-const body = await request.text();
+import { verifyPayload } from '@arraypress/webhook-dispatcher';
 
-const expected = await signPayload(secret, Number(timestamp), body);
-const valid = signature === expected;
+const body = await request.text();
+const result = await verifyPayload({
+  body,
+  signature: request.headers.get('X-Webhook-Signature'),
+  timestamp: request.headers.get('X-Webhook-Timestamp'),
+  secret: 'whsec_abc123',
+});
+
+if (!result.valid) {
+  return new Response(result.reason, { status: 401 });
+}
+
+const payload = JSON.parse(body);
 ```
+
+Options:
+- `tolerance` — Max age in seconds before rejecting (default `300` = 5 minutes). Set to `0` to disable replay protection.
+
+```js
+// Custom tolerance (10 minutes)
+await verifyPayload({ body, signature, timestamp, secret, tolerance: 600 });
+
+// Disable replay protection
+await verifyPayload({ body, signature, timestamp, secret, tolerance: 0 });
+```
+
+Possible rejection reasons: `"Missing required fields"`, `"Invalid timestamp"`, `"Timestamp too old"`, `"Timestamp in the future"`, `"Signature mismatch"`, `"Verification failed"`.
 
 ## License
 
